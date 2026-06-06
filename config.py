@@ -9,8 +9,10 @@ RESULT_DIR = os.path.join(BASE_DIR, "storage", "results")
 PRESET_DIR = os.path.join(BASE_DIR, "storage", "presets")
 EXPERIMENT_DIR = os.path.join(BASE_DIR, "storage", "experiments")
 TEMP_DIR = os.path.join(BASE_DIR, "storage", "temp")
+CHECKPOINT_DIR = os.path.join(BASE_DIR, "storage", "checkpoints")
+TRAINING_DIR = os.path.join(BASE_DIR, "storage", "training")
 
-for dir_path in [MODEL_DIR, DATASET_DIR, RESULT_DIR, PRESET_DIR, EXPERIMENT_DIR, TEMP_DIR]:
+for dir_path in [MODEL_DIR, DATASET_DIR, RESULT_DIR, PRESET_DIR, EXPERIMENT_DIR, TEMP_DIR, CHECKPOINT_DIR, TRAINING_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

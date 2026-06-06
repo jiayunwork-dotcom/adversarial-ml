@@ -19,6 +19,7 @@ from src.attacks import FGSM, PGD, CarliniWagner, DeepFool, AutoAttack, SquareAt
 from src.metrics import RobustnessMetrics, QualityMetrics
 from src.defenses import DefenseMethods
 from src.visualization import Visualizer
+from src.training import TrainingManager
 from src.utils import (
     ExperimentManager,
     PresetManager,
@@ -38,6 +39,7 @@ robustness_metrics = RobustnessMetrics(model_manager)
 quality_metrics = QualityMetrics()
 defense_methods = DefenseMethods()
 visualizer = Visualizer()
+training_manager = TrainingManager(model_manager, dataset_manager, robustness_metrics)
 
 
 ATTACK_METHODS = {
@@ -682,6 +684,166 @@ def run_attack_comparison(model_id, dataset_id, attack_methods, epsilon,
         return None, None, f"对比实验失败: {str(e)}"
 
 
+def start_adversarial_training(model_id, dataset_id, method, epochs, learning_rate,
+                               batch_size, attack_steps, epsilon, beta, resume):
+    if not model_id:
+        return "请选择模型", None, None, None
+    if not dataset_id:
+        return "请选择数据集", None, None, None
+
+    try:
+        model_info = model_manager.get_model(model_id)
+        if model_info and model_info.is_onnx:
+            return "ONNX模型不支持对抗训练", None, None, None
+
+        task = training_manager.create_training_task(
+            model_id=model_id,
+            dataset_id=dataset_id,
+            method=method,
+            epochs=int(epochs),
+            learning_rate=float(learning_rate),
+            batch_size=int(batch_size),
+            attack_steps=int(attack_steps),
+            epsilon=float(epsilon) / 255.0,
+            beta=float(beta),
+            resume_from_checkpoint=resume
+        )
+
+        training_manager.start_training(task.id)
+
+        return (
+            f"训练已开始！任务ID: {task.id}\n"
+            f"模型: {task.original_model_name}\n"
+            f"方法: {'PGD-AT' if method == 'pgd_at' else 'TRADES'}\n"
+            f"轮数: {epochs}",
+            task.id,
+            refresh_training_task_list(),
+            None
+        )
+    except Exception as e:
+        return f"启动训练失败: {str(e)}", None, refresh_training_task_list(), None
+
+
+def stop_training(task_id):
+    if not task_id:
+        return "请提供任务ID", refresh_training_task_list()
+
+    try:
+        if training_manager.stop_training(task_id):
+            return f"已发送终止信号，任务 {task_id} 将在当前batch结束后停止", refresh_training_task_list()
+        else:
+            return "任务未在运行或不存在", refresh_training_task_list()
+    except Exception as e:
+        return f"终止失败: {str(e)}", refresh_training_task_list()
+
+
+def update_training_logs(task_id):
+    if not task_id:
+        return "", None
+
+    try:
+        logs = training_manager.get_training_logs(task_id)
+        status = training_manager.get_training_status(task_id)
+
+        log_text = ""
+        for log in logs:
+            log_text += training_manager.format_log_message(log) + "\n"
+
+        comparison = training_manager.get_comparison_results(task_id)
+        comparison_html = None
+
+        if comparison:
+            comparison_html = create_comparison_table_html(comparison)
+
+        status_text = f"\n=== 当前状态: {status.value.upper()} ===\n"
+        return log_text + status_text, comparison_html
+    except Exception as e:
+        return f"获取日志失败: {str(e)}", None
+
+
+def create_comparison_table_html(comparison):
+    orig_clean = comparison['original']['clean_accuracy']
+    orig_robust = comparison['original']['robust_accuracy']
+    trained_clean = comparison['trained']['clean_accuracy']
+    trained_robust = comparison['trained']['robust_accuracy']
+
+    clean_diff = trained_clean - orig_clean
+    robust_diff = trained_robust - orig_robust
+
+    def format_value(val, diff):
+        color = "green" if diff >= 0 else "red"
+        arrow = "↑" if diff >= 0 else "↓"
+        return f"{val:.2f}% <span style='color:{color}'>({arrow} {abs(diff):.2f}%)</span>"
+
+    html = f"""
+    <div style="padding: 20px; background: #f8f9fa; border-radius: 10px; margin-top: 20px;">
+        <h3 style="margin-bottom: 15px;">📊 鲁棒性对比 ({comparison['original_model_name']})</h3>
+        <table style="width: 100%; border-collapse: collapse; background: white;">
+            <thead>
+                <tr style="background: #e9ecef;">
+                    <th style="padding: 12px; border: 1px solid #dee2e6; text-align: left;">指标</th>
+                    <th style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">原始模型</th>
+                    <th style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">对抗训练后</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: bold;">Clean Accuracy</td>
+                    <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">{orig_clean:.2f}%</td>
+                    <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">{format_value(trained_clean, clean_diff)}</td>
+                </tr>
+                <tr style="background: #f8f9fa;">
+                    <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: bold;">Robust Accuracy</td>
+                    <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">{orig_robust:.2f}%</td>
+                    <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">{format_value(trained_robust, robust_diff)}</td>
+                </tr>
+            </tbody>
+        </table>
+        <p style="margin-top: 15px; color: #666;">
+            训练后的模型已保存，ID: <code>{comparison['result_model_id']}</code>
+        </p>
+    </div>
+    """
+    return html
+
+
+def refresh_training_task_list():
+    tasks = training_manager.list_tasks()
+
+    data = []
+    for task in tasks:
+        status_map = {
+            "pending": "⏳ 等待中",
+            "running": "▶️ 运行中",
+            "completed": "✅ 完成",
+            "stopped": "⏹️ 已终止",
+            "error": "❌ 错误"
+        }
+        status_display = status_map.get(task.status.value, task.status.value)
+        method_display = "PGD-AT" if task.config.method == "pgd_at" else "TRADES"
+
+        data.append([
+            task.id,
+            task.original_model_name,
+            method_display,
+            f"{task.config.epochs}",
+            status_display,
+            task.start_time or "-",
+            task.end_time or "-",
+        ])
+
+    df = pd.DataFrame(data, columns=[
+        "任务ID", "模型名称", "训练方法", "总轮数", "状态", "开始时间", "结束时间"
+    ])
+    return df
+
+
+def get_pgd_only_params_ui(method):
+    if method == "trades":
+        return gr.update(visible=True)
+    return gr.update(visible=False)
+
+
 CUSTOM_CSS = """
 .tab-container,
 div[role="tablist"],
@@ -1174,9 +1336,133 @@ def create_app():
 
                 compare_btn.click(compare_experiments, inputs=compare_ids, outputs=compare_result)
 
+            with gr.TabItem("⚙️ 对抗训练流水线"):
+                gr.Markdown("## 对抗训练流水线")
+                gr.Markdown("对已有模型进行对抗训练，提升模型的鲁棒性。支持PGD-AT和TRADES两种训练方法。")
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 训练配置")
+
+                        model_select_train = gr.Dropdown(
+                            choices=get_model_choices(),
+                            label="选择模型（仅PyTorch模型）"
+                        )
+                        dataset_select_train = gr.Dropdown(
+                            choices=get_dataset_choices(),
+                            label="选择数据集"
+                        )
+
+                        train_method = gr.Radio(
+                            choices=[
+                                ("PGD-AT (标准对抗训练)", "pgd_at"),
+                                ("TRADES (KL散度正则化)", "trades"),
+                            ],
+                            value="pgd_at",
+                            label="对抗训练方法"
+                        )
+
+                        with gr.Row():
+                            epochs_train = gr.Slider(
+                                minimum=1, maximum=50, value=10, step=1,
+                                label="训练轮数 (epochs)"
+                            )
+                            learning_rate_train = gr.Number(
+                                value=0.01, label="学习率"
+                            )
+
+                        with gr.Row():
+                            batch_size_train = gr.Number(
+                                value=32, precision=0, label="Batch Size"
+                            )
+                            attack_steps_train = gr.Number(
+                                value=10, precision=0, label="攻击步数 (PGD迭代次数)"
+                            )
+
+                        epsilon_train = gr.Slider(
+                            minimum=1, maximum=32, value=8, step=1,
+                            label="攻击 Epsilon (/255)"
+                        )
+
+                        with gr.Column(visible=False) as trades_params:
+                            beta_train = gr.Slider(
+                                minimum=1.0, maximum=10.0, value=6.0, step=0.5,
+                                label="TRADES Beta 参数 (clean/robust权重比)"
+                            )
+
+                        train_method.change(
+                            get_pgd_only_params_ui,
+                            inputs=train_method,
+                            outputs=trades_params
+                        )
+
+                        resume_checkpoint = gr.Checkbox(
+                            value=False,
+                            label="从最近的checkpoint恢复训练"
+                        )
+
+                        with gr.Row():
+                            start_train_btn = gr.Button("开始对抗训练", variant="primary")
+                            stop_train_btn = gr.Button("终止训练", variant="stop")
+
+                        training_task_id = gr.Textbox(label="当前任务ID", interactive=False)
+                        training_status = gr.Textbox(label="训练状态", interactive=False, lines=5)
+
+                    with gr.Column(scale=1.5):
+                        gr.Markdown("### 训练日志")
+                        training_logs = gr.Textbox(
+                            label="实时训练日志",
+                            interactive=False,
+                            lines=25,
+                            max_lines=25,
+                            autoscroll=True
+                        )
+
+                        training_comparison = gr.HTML(label="训练结果对比")
+
+                        gr.Markdown("### 训练任务列表")
+                        training_task_list = gr.Dataframe(
+                            interactive=False,
+                            label="历史训练任务"
+                        )
+                        refresh_train_tasks_btn = gr.Button("刷新任务列表")
+
+                start_train_btn.click(
+                    start_adversarial_training,
+                    inputs=[
+                        model_select_train, dataset_select_train, train_method,
+                        epochs_train, learning_rate_train, batch_size_train,
+                        attack_steps_train, epsilon_train, beta_train,
+                        resume_checkpoint
+                    ],
+                    outputs=[training_status, training_task_id, training_task_list, training_comparison]
+                )
+
+                stop_train_btn.click(
+                    stop_training,
+                    inputs=[training_task_id],
+                    outputs=[training_status, training_task_list]
+                )
+
+                refresh_train_tasks_btn.click(
+                    refresh_training_task_list,
+                    outputs=training_task_list
+                )
+
+                def poll_logs(task_id):
+                    return update_training_logs(task_id)
+
+                training_task_id.change(
+                    poll_logs,
+                    inputs=[training_task_id],
+                    outputs=[training_logs, training_comparison],
+                    every=2.0
+                )
+
         app.load(refresh_model_list, outputs=model_list)
         app.load(refresh_dataset_list, outputs=dataset_list)
         app.load(get_experiment_records, outputs=experiment_table)
+        app.load(refresh_training_task_list, outputs=training_task_list)
 
     return app
 
