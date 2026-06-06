@@ -126,17 +126,43 @@ class DatasetManager:
 
     def _ensure_builtin_dataset(self) -> None:
         builtin_id = "builtin_imagenet_100"
+        builtin_path = os.path.join(DATASET_DIR, builtin_id)
+        version_file = os.path.join(builtin_path, ".dataset_version")
+        current_version = "2.0"
+
+        needs_rebuild = False
         if builtin_id not in self._datasets:
-            builtin_path = os.path.join(DATASET_DIR, builtin_id)
+            needs_rebuild = True
+        elif not os.path.exists(version_file):
+            needs_rebuild = True
+        else:
+            try:
+                with open(version_file, "r") as f:
+                    saved_version = f.read().strip()
+                if saved_version != current_version:
+                    needs_rebuild = True
+            except:
+                needs_rebuild = True
+
+        if needs_rebuild:
+            import shutil
+            if os.path.exists(builtin_path):
+                shutil.rmtree(builtin_path)
+            if builtin_id in self._datasets:
+                del self._datasets[builtin_id]
+
             os.makedirs(builtin_path, exist_ok=True)
             self._create_sample_dataset(builtin_path)
+
+            with open(version_file, "w") as f:
+                f.write(current_version)
 
             class_dist = self._analyze_class_distribution(builtin_path)
             size_range = self._analyze_image_sizes(builtin_path)
 
             ds_info = DatasetInfo(
                 id=builtin_id,
-                name="ImageNet 验证子集 (100张)",
+                name="ImageNet 验证子集 (100张, CIFAR10)",
                 path=builtin_path,
                 total_images=100,
                 class_distribution=class_dist,
@@ -152,15 +178,76 @@ class DatasetManager:
         np.random.seed(42)
         selected_classes = np.random.choice(100, 10, replace=False)
 
-        for i, class_idx in enumerate(selected_classes):
-            class_name = labels[class_idx]
-            class_dir = os.path.join(path, f"{class_idx:04d}_{class_name}")
-            os.makedirs(class_dir, exist_ok=True)
+        try:
+            from torchvision import datasets, transforms
+            import torchvision.transforms.functional as TF
 
-            for j in range(10):
-                img_array = np.random.randint(0, 256, (224, 224, 3), dtype=np.uint8)
-                img = Image.fromarray(img_array)
-                img.save(os.path.join(class_dir, f"image_{j:02d}.jpg"))
+            cifar10 = datasets.CIFAR10(root=os.path.join(TEMP_DIR, "cifar10"),
+                                       train=False, download=True)
+            cifar_images = cifar10.data
+            cifar_labels = cifar10.targets
+
+            cifar_class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
+                                 'dog', 'frog', 'horse', 'ship', 'truck']
+
+            for i, class_idx in enumerate(selected_classes):
+                class_name = labels[class_idx]
+                class_dir = os.path.join(path, f"{class_idx:04d}_{class_name}")
+                os.makedirs(class_dir, exist_ok=True)
+
+                cifar_class_idx = i % 10
+                class_mask = np.array(cifar_labels) == cifar_class_idx
+                class_images = cifar_images[class_mask]
+
+                if len(class_images) >= 10:
+                    indices = np.random.choice(len(class_images), 10, replace=False)
+                else:
+                    indices = np.random.choice(len(class_images), 10, replace=True)
+
+                for j, idx in enumerate(indices):
+                    img_array = class_images[idx]
+                    img = Image.fromarray(img_array)
+                    img = img.resize((224, 224), Image.BILINEAR)
+                    img.save(os.path.join(class_dir, f"image_{j:02d}.jpg"))
+
+        except Exception as e:
+            print(f"Warning: Could not download CIFAR10, using structured patterns instead: {e}")
+            for i, class_idx in enumerate(selected_classes):
+                class_name = labels[class_idx]
+                class_dir = os.path.join(path, f"{class_idx:04d}_{class_name}")
+                os.makedirs(class_dir, exist_ok=True)
+
+                for j in range(10):
+                    img_array = self._create_structured_image(i, j)
+                    img = Image.fromarray(img_array)
+                    img.save(os.path.join(class_dir, f"image_{j:02d}.jpg"))
+
+    def _create_structured_image(self, class_idx: int, img_idx: int) -> np.ndarray:
+        img = np.zeros((224, 224, 3), dtype=np.uint8)
+        base_color = [(class_idx * 25) % 255, (class_idx * 50) % 255, (class_idx * 75) % 255]
+
+        for y in range(224):
+            for x in range(224):
+                pattern = (x // 32 + y // 32 + img_idx) % 3
+                if pattern == 0:
+                    img[y, x] = base_color
+                elif pattern == 1:
+                    img[y, x] = [min(255, c + 50) for c in base_color]
+                else:
+                    img[y, x] = [max(0, c - 50) for c in base_color]
+
+        for k in range(5 + img_idx):
+            cx = (img_idx * 37 + k * 53) % 200 + 12
+            cy = (k * 41 + img_idx * 29) % 200 + 12
+            r = 8 + (k % 3) * 4
+            for dy in range(-r, r + 1):
+                for dx in range(-r, r + 1):
+                    if dx * dx + dy * dy <= r * r:
+                        ny, nx = cy + dy, cx + dx
+                        if 0 <= ny < 224 and 0 <= nx < 224:
+                            img[ny, nx] = [255 - base_color[0], 255 - base_color[1], 255 - base_color[2]]
+
+        return img
 
     def upload_dataset(self, zip_path: str, name: str) -> DatasetInfo:
         dataset_id = generate_id()

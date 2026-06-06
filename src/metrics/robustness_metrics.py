@@ -16,10 +16,16 @@ class RobustnessMetrics:
 
     def evaluate(self, model_id: str, dataloader: DataLoader,
                  attack_fn: Callable, attack_params: Dict[str, Any],
-                 progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
+                 progress_callback: Optional[Callable] = None,
+                 model: Optional[nn.Module] = None,
+                 attack_model: Optional[nn.Module] = None) -> Dict[str, Any]:
         model_info = self.model_manager.get_model(model_id)
-        model = self.model_manager.load_model(model_id)
+        if model is None:
+            model = self.model_manager.load_model(model_id)
+        if attack_model is None:
+            attack_model = model
         model.eval()
+        attack_model.eval()
 
         clean_correct = 0
         robust_correct = 0
@@ -65,7 +71,7 @@ class RobustnessMetrics:
                 clean_images = images[clean_mask]
                 clean_labels = labels[clean_mask]
 
-                adv_images = attack_fn(model, clean_images, clean_labels, **attack_params)
+                adv_images = attack_fn(attack_model, clean_images, clean_labels, **attack_params)
 
                 with torch.no_grad():
                     adv_outputs = model(normalize_image(adv_images))
@@ -117,7 +123,7 @@ class RobustnessMetrics:
 
         if clean_correct_mask.sum() > 0 and len(all_confidences_adv) > 0:
             conf_clean = torch.tensor(all_confidences_clean)[clean_correct_mask].numpy()
-            conf_adv = torch.tensor(all_confidences_adv)
+            conf_adv = torch.tensor(all_confidences_adv).numpy()
             if len(conf_clean) > 0 and len(conf_adv) > 0:
                 min_len = min(len(conf_clean), len(conf_adv))
                 confidence_drop = 100.0 * np.mean(conf_clean[:min_len] - conf_adv[:min_len])

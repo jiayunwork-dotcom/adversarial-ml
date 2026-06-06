@@ -95,8 +95,6 @@ def delete_model(model_id):
 
 def refresh_model_list():
     models = model_manager.list_models()
-    if not models:
-        return "暂无模型"
 
     data = []
     for m in models:
@@ -133,8 +131,6 @@ def upload_dataset(file, name):
 
 def refresh_dataset_list():
     datasets = dataset_manager.list_datasets()
-    if not datasets:
-        return "暂无数据集"
 
     data = []
     for d in datasets:
@@ -332,19 +328,21 @@ def run_defense_comparison(model_id, defense_type, jpeg_q, min_s, max_s, bits, k
         )
 
         if defense_type != "adversarial_model":
-            model = model_manager.load_model(model_id)
+            original_model = model_manager.load_model(model_id)
             defended_model = defense_methods.wrap_model_with_defense(
-                model, defense_type, **defense_params
+                original_model, defense_type, **defense_params
             )
             from src.metrics.robustness_metrics import RobustnessMetrics as RM
             metrics_calculator = RM(model_manager)
 
-            def defended_attack_fn(def_model, images, labels, **kwargs):
-                attack = get_attack_instance(attack_method, def_model, kwargs)
+            def defended_attack_fn(att_model, images, labels, **kwargs):
+                attack = get_attack_instance(attack_method, att_model, kwargs)
                 return attack.generate(images, labels)
 
             defense_metrics = metrics_calculator.evaluate(
-                model_id, dataloader, defended_attack_fn, attack_params_dict
+                model_id, dataloader, defended_attack_fn, attack_params_dict,
+                model=defended_model,
+                attack_model=original_model
             )
         else:
             if not model_id_defense:
@@ -441,8 +439,6 @@ def run_transferability_analysis(model_ids, dataset_id, attack_method,
 
 def get_experiment_records():
     experiments = experiment_manager.list_experiments()
-    if not experiments:
-        return "暂无实验记录"
 
     data = []
     for exp in experiments:
