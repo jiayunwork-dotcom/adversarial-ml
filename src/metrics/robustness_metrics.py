@@ -5,9 +5,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import time
 
 from config import DEVICE
 from src.utils.helpers import normalize_image, denormalize_image, compute_perturbation_metrics
+from src.metrics.quality_metrics import QualityMetrics
 
 
 class RobustnessMetrics:
@@ -172,3 +174,99 @@ class RobustnessMetrics:
             }
 
         return comparison
+
+    def evaluate_with_extra_metrics(self, model_id: str, dataloader: DataLoader,
+                                    attack_fn: Callable, attack_params: Dict[str, Any],
+                                    progress_callback: Optional[Callable] = None,
+                                    model: Optional[nn.Module] = None,
+                                    attack_model: Optional[nn.Module] = None) -> Dict[str, Any]:
+        model_info = self.model_manager.get_model(model_id)
+        if model is None:
+            model = self.model_manager.load_model(model_id)
+        if attack_model is None:
+            attack_model = model
+        model.eval()
+        attack_model.eval()
+
+        quality_metrics = QualityMetrics()
+
+        clean_correct = 0
+        robust_correct = 0
+        attack_success = 0
+        total_samples = 0
+
+        all_perts_l2 = []
+        all_ssim = []
+        total_time = 0.0
+        total_attack_samples = 0
+
+        total_batches = len(dataloader)
+
+        for batch_idx, (images, labels) in enumerate(tqdm(dataloader, desc="Evaluating with extra metrics")):
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
+            batch_size = labels.size(0)
+
+            with torch.no_grad():
+                clean_outputs = model(normalize_image(images))
+                clean_preds = clean_outputs.argmax(1)
+
+            clean_mask = clean_preds == labels
+            clean_correct += clean_mask.sum().item()
+            total_samples += batch_size
+
+            if clean_mask.sum() > 0:
+                clean_images = images[clean_mask]
+                clean_labels = labels[clean_mask]
+                num_attack = clean_images.size(0)
+                total_attack_samples += num_attack
+
+                start_time = time.time()
+                adv_images = attack_fn(attack_model, clean_images, clean_labels, **attack_params)
+                end_time = time.time()
+                total_time += (end_time - start_time)
+
+                with torch.no_grad():
+                    adv_outputs = model(normalize_image(adv_images))
+                    adv_preds = adv_outputs.argmax(1)
+
+                adv_mask = adv_preds == clean_labels
+                robust_correct += adv_mask.sum().item()
+                attack_success += (~adv_mask).sum().item()
+
+                for i in range(num_attack):
+                    linf, l2 = compute_perturbation_metrics(
+                        clean_images[i:i+1], adv_images[i:i+1]
+                    )
+                    all_perts_l2.append(l2)
+
+                    ssim_val = quality_metrics.compute_ssim(
+                        clean_images[i:i+1], adv_images[i:i+1]
+                    )
+                    all_ssim.append(ssim_val)
+
+            if progress_callback:
+                progress_callback(batch_idx + 1, total_batches)
+
+        clean_acc = 100.0 * clean_correct / total_samples if total_samples > 0 else 0.0
+        robust_acc = 100.0 * robust_correct / max(clean_correct, 1) if clean_correct > 0 else 0.0
+        attack_success_rate = 100.0 * attack_success / max(clean_correct, 1) if clean_correct > 0 else 0.0
+
+        avg_pert_l2 = np.mean(all_perts_l2) if all_perts_l2 else 0.0
+        ssim_mean = np.mean(all_ssim) if all_ssim else 0.0
+        avg_time_per_sample = total_time / max(total_attack_samples, 1) if total_attack_samples > 0 else 0.0
+
+        metrics = {
+            "clean_accuracy": clean_acc,
+            "robust_accuracy": robust_acc,
+            "attack_success_rate": attack_success_rate,
+            "average_perturbation_l2": avg_pert_l2,
+            "ssim_mean": ssim_mean,
+            "avg_time_per_sample": avg_time_per_sample,
+            "total_samples": total_samples,
+            "clean_correct": clean_correct,
+            "robust_correct": robust_correct,
+            "attack_success": attack_success,
+        }
+
+        return metrics

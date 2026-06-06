@@ -13,7 +13,8 @@ class ExperimentManager:
             save_json([], self.experiment_file)
 
     def record_experiment(self, model_id: str, dataset_id: str, attack_method: str,
-                          attack_params: Dict[str, Any], metrics: Dict[str, Any]) -> str:
+                          attack_params: Dict[str, Any], metrics: Dict[str, Any],
+                          experiment_type: str = "single") -> str:
         experiments = self._load_experiments()
         exp_id = generate_id()
         experiment = {
@@ -24,6 +25,27 @@ class ExperimentManager:
             "attack_method": attack_method,
             "attack_params": attack_params,
             "metrics": metrics,
+            "experiment_type": experiment_type,
+        }
+        experiments.append(experiment)
+        self._save_experiments(experiments)
+        return exp_id
+
+    def record_comparison_experiment(self, model_id: str, dataset_id: str,
+                                     attack_methods: List[str],
+                                     attack_params: Dict[str, Any],
+                                     results: List[Dict[str, Any]]) -> str:
+        experiments = self._load_experiments()
+        exp_id = generate_id()
+        experiment = {
+            "id": exp_id,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "model_id": model_id,
+            "dataset_id": dataset_id,
+            "attack_method": attack_methods,
+            "attack_params": attack_params,
+            "metrics": results,
+            "experiment_type": "comparison",
         }
         experiments.append(experiment)
         self._save_experiments(experiments)

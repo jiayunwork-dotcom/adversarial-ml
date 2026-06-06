@@ -257,7 +257,8 @@ def run_batch_evaluation(model_id, dataset_id, attack_method, epsilon, norm,
         model_manager.evaluate_clean_accuracy(model_id, dataloader)
 
         experiment_manager.record_experiment(
-            model_id, dataset_id, attack_method, attack_params_dict, metrics
+            model_id, dataset_id, attack_method, attack_params_dict, metrics,
+            experiment_type="single"
         )
 
         acc_fig = visualizer.create_accuracy_bar_chart(
@@ -437,8 +438,12 @@ def run_transferability_analysis(model_ids, dataset_id, attack_method,
         return f"分析失败: {str(e)}", None
 
 
-def get_experiment_records():
-    experiments = experiment_manager.list_experiments()
+def get_experiment_records(exp_type="all"):
+    filter_by = None
+    if exp_type != "all":
+        filter_by = {"experiment_type": exp_type}
+
+    experiments = experiment_manager.list_experiments(filter_by=filter_by)
 
     data = []
     for exp in experiments:
@@ -447,19 +452,35 @@ def get_experiment_records():
         dataset_info = dataset_manager.get_dataset(exp["dataset_id"])
         model_name = model_info.name if model_info else exp["model_id"]
         dataset_name = dataset_info.name if dataset_info else exp["dataset_id"]
+        exp_type_val = exp.get("experiment_type", "single")
+
+        type_display = "单攻击实验" if exp_type_val == "single" else "对比实验" if exp_type_val == "comparison" else exp_type_val
+
+        attack_method_val = exp["attack_method"]
+        if isinstance(attack_method_val, list):
+            attack_display = f"{len(attack_method_val)}种方法对比"
+        else:
+            attack_display = ATTACK_METHODS.get(attack_method_val, {}).get("name", attack_method_val)
+
+        epsilon_val = exp['attack_params'].get('epsilon', 0) * 255
+
+        if exp_type_val == "comparison" and isinstance(metrics, list):
+            robust_acc = "多结果"
+            clean_acc = f"{metrics[0]['clean_accuracy']:.2f}%" if metrics else "N/A"
+            attack_success = "多结果"
+        else:
+            clean_acc = f"{metrics['clean_accuracy']:.2f}%"
+            robust_acc = f"{metrics['robust_accuracy']:.2f}%"
+            attack_success = f"{metrics['attack_success_rate']:.2f}%"
 
         data.append([
-            exp["timestamp"], model_name, dataset_name,
-            ATTACK_METHODS.get(exp["attack_method"], {}).get("name", exp["attack_method"]),
-            f"{exp['attack_params'].get('epsilon', 0) * 255:.0f}/255",
-            f"{metrics['clean_accuracy']:.2f}%",
-            f"{metrics['robust_accuracy']:.2f}%",
-            f"{metrics['attack_success_rate']:.2f}%",
-            exp["id"]
+            exp["timestamp"], model_name, dataset_name, attack_display,
+            f"{epsilon_val:.0f}/255", type_display, clean_acc, robust_acc,
+            attack_success, exp["id"]
         ])
 
     df = pd.DataFrame(data, columns=[
-        "时间", "模型", "数据集", "攻击方法", "Epsilon",
+        "时间", "模型", "数据集", "攻击方法", "Epsilon", "类型",
         "Clean Acc", "Robust Acc", "Attack Success", "ID"
     ])
     return df
@@ -509,7 +530,8 @@ def batch_evaluation(model_id, dataset_id, attack_methods, epsilons,
                 )
 
                 exp_id = experiment_manager.record_experiment(
-                    model_id, dataset_id, attack_method, attack_params_dict, metrics
+                    model_id, dataset_id, attack_method, attack_params_dict, metrics,
+                    experiment_type="single"
                 )
 
                 all_results.append({
@@ -582,6 +604,84 @@ def get_attack_params_ui(attack_method):
     return params
 
 
+def run_attack_comparison(model_id, dataset_id, attack_methods, epsilon,
+                          progress=gr.Progress()):
+    if not model_id:
+        return None, None, "请选择模型"
+    if not dataset_id:
+        return None, None, "请选择数据集"
+    if not attack_methods or len(attack_methods) < 2:
+        return None, None, "请至少选择2种攻击方法"
+
+    try:
+        model_info = model_manager.get_model(model_id)
+        input_size = model_info.input_size
+
+        dataloader = dataset_manager.get_dataloader(
+            dataset_id, batch_size=8, input_size=input_size, shuffle=False
+        )
+
+        all_results = []
+        total_tasks = len(attack_methods)
+        current_task = 0
+
+        for attack_method in attack_methods:
+            current_task += 1
+            progress(current_task / total_tasks,
+                    desc=f"评估 {ATTACK_METHODS[attack_method]['name']} ({current_task}/{total_tasks})")
+
+            attack_params_dict = {
+                "epsilon": epsilon / 255.0,
+                "norm": "Linf",
+                "iterations": 20,
+                "alpha": 2.0 / 255.0,
+                "random_start": True,
+            }
+
+            def attack_fn(model, images, labels, **kwargs):
+                attack = get_attack_instance(attack_method, model, kwargs)
+                return attack.generate(images, labels)
+
+            metrics = robustness_metrics.evaluate_with_extra_metrics(
+                model_id, dataloader, attack_fn, attack_params_dict
+            )
+
+            result = {
+                "attack_name": ATTACK_METHODS[attack_method]['name'],
+                "attack_key": attack_method,
+                "robust_accuracy": metrics["robust_accuracy"],
+                "attack_success_rate": metrics["attack_success_rate"],
+                "average_perturbation_l2": metrics["average_perturbation_l2"],
+                "avg_time_per_sample": metrics["avg_time_per_sample"],
+                "ssim_mean": metrics["ssim_mean"],
+                "clean_accuracy": metrics["clean_accuracy"],
+                "total_samples": metrics["total_samples"],
+            }
+            all_results.append(result)
+
+        exp_id = experiment_manager.record_comparison_experiment(
+            model_id, dataset_id, attack_methods,
+            {"epsilon": epsilon / 255.0, "norm": "Linf"},
+            all_results
+        )
+
+        comparison_table = visualizer.create_attack_comparison_table(all_results)
+        radar_chart = visualizer.create_attack_comparison_radar(all_results)
+
+        result_text = f"对比实验完成！实验ID: {exp_id}\n\n"
+        for r in all_results:
+            result_text += f"[{r['attack_name']}]\n"
+            result_text += f"  Robust Accuracy: {r['robust_accuracy']:.2f}%\n"
+            result_text += f"  Attack Success Rate: {r['attack_success_rate']:.2f}%\n"
+            result_text += f"  Avg Perturbation (L2): {r['average_perturbation_l2']:.6f}\n"
+            result_text += f"  平均耗时: {r['avg_time_per_sample']:.4f} 秒/样本\n"
+            result_text += f"  SSIM均值: {r['ssim_mean']:.4f}\n\n"
+
+        return comparison_table, radar_chart, result_text
+    except Exception as e:
+        return None, None, f"对比实验失败: {str(e)}"
+
+
 def create_app():
     with gr.Blocks(title="对抗样本生成与模型鲁棒性评估平台") as app:
         gr.Markdown("# 🛡️ 对抗样本生成与模型鲁棒性评估平台")
@@ -597,6 +697,7 @@ def create_app():
                 - **批量评估**: 对整个测试集运行攻击，计算鲁棒性指标
                 - **防御对比**: 测试输入变换防御和对抗训练模型的效果
                 - **可迁移性分析**: 分析对抗样本在不同模型间的迁移能力
+                - **攻击对比实验**: 多种攻击方法在统一参数下的对比评估
                 - **实验记录**: 历史评估记录和对比分析
                 """)
 
@@ -938,10 +1039,54 @@ def create_app():
                     outputs=[result_table_multi, result_chart_multi]
                 )
 
+            with gr.TabItem("🔍 攻击对比实验"):
+                gr.Markdown("## 多种攻击方法对比实验")
+                gr.Markdown("选定模型和数据集后，同时选择多种攻击方法，使用统一的epsilon参数进行对比评估。")
+
+                with gr.Row():
+                    with gr.Column():
+                        model_select_compare = gr.Dropdown(
+                            choices=get_model_choices(), label="选择模型"
+                        )
+                        dataset_select_compare = gr.Dropdown(
+                            choices=get_dataset_choices(), label="选择数据集"
+                        )
+                        attacks_compare = gr.CheckboxGroup(
+                            choices=[(v["name"], k) for k, v in ATTACK_METHODS.items()],
+                            value=["fgsm", "pgd"],
+                            label="攻击方法（至少选择2种）"
+                        )
+                        epsilon_compare = gr.Slider(
+                            minimum=0, maximum=32, value=8, step=1,
+                            label="统一扰动预算 epsilon (/255)"
+                        )
+                        run_compare_btn = gr.Button("开始对比", variant="primary")
+
+                    with gr.Column():
+                        result_text_compare = gr.Textbox(label="对比结果摘要", interactive=False, lines=15)
+                        comparison_table_plot = gr.Plot(label="对比结果表格")
+
+                radar_chart_plot = gr.Plot(label="综合对比雷达图")
+
+                run_compare_btn.click(
+                    run_attack_comparison,
+                    inputs=[
+                        model_select_compare, dataset_select_compare,
+                        attacks_compare, epsilon_compare
+                    ],
+                    outputs=[comparison_table_plot, radar_chart_plot, result_text_compare]
+                )
+
             with gr.TabItem("📋 实验记录"):
                 with gr.Row():
                     with gr.Column():
-                        refresh_exp_btn = gr.Button("刷新记录")
+                        with gr.Row():
+                            exp_type_filter = gr.Radio(
+                                choices=[("全部", "all"), ("单攻击实验", "single"), ("对比实验", "comparison")],
+                                value="all",
+                                label="实验类型筛选"
+                            )
+                            refresh_exp_btn = gr.Button("刷新记录")
                         experiment_table = gr.Dataframe(interactive=False, label="历史实验记录")
 
                     with gr.Column():
@@ -950,6 +1095,7 @@ def create_app():
                         compare_result = gr.Plot(label="对比图表")
 
                 refresh_exp_btn.click(get_experiment_records, outputs=experiment_table)
+                exp_type_filter.change(get_experiment_records, inputs=exp_type_filter, outputs=experiment_table)
 
                 def compare_experiments(ids_str):
                     ids = [s.strip() for s in ids_str.split(",") if s.strip()]

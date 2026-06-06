@@ -231,3 +231,130 @@ class Visualizer:
             grid.paste(img_pil, (x, y))
 
         return grid
+
+    def create_attack_comparison_radar(self, results: List[Dict[str, Any]]) -> go.Figure:
+        categories = ['攻击成功率', '平均扰动量', '平均耗时', 'SSIM']
+
+        fig = go.Figure()
+
+        for result in results:
+            attack_name = result['attack_name']
+            success_rate = result['attack_success_rate'] / 100.0
+            perturbation = min(result['average_perturbation_l2'] / 0.1, 1.0)
+            time_norm = min(result['avg_time_per_sample'] / 1.0, 1.0)
+            ssim_val = max(0, min(result.get('ssim_mean', 0), 1.0))
+
+            values = [success_rate, perturbation, time_norm, ssim_val]
+
+            fig.add_trace(go.Scatterpolar(
+                r=values,
+                theta=categories,
+                fill='toself',
+                name=attack_name,
+                opacity=0.6
+            ))
+
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(
+                    visible=True,
+                    range=[0, 1],
+                    tickfont=dict(size=10)
+                ),
+                angularaxis=dict(
+                    tickfont=dict(size=12)
+                )
+            ),
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.1,
+                xanchor="center",
+                x=0.5
+            ),
+            title=dict(
+                text='攻击方法综合对比雷达图',
+                x=0.5,
+                xanchor='center'
+            ),
+            height=500
+        )
+
+        return fig
+
+    def create_attack_comparison_table(self, results: List[Dict[str, Any]]) -> go.Figure:
+        headers = ['攻击方法', 'Robust Accuracy (%)', 'Attack Success Rate (%)',
+                   'Avg Perturbation (L2)', '平均耗时 (秒/样本)', 'SSIM均值']
+
+        cell_values = [[], [], [], [], [], []]
+        fill_colors = [[], [], [], [], [], []]
+
+        cols_data = {
+            1: 'robust_accuracy',
+            2: 'attack_success_rate',
+            3: 'average_perturbation_l2',
+            4: 'avg_time_per_sample',
+            5: 'ssim_mean'
+        }
+
+        higher_is_better = {1: True, 2: False, 3: False, 4: False, 5: True}
+
+        for result in results:
+            cell_values[0].append(result['attack_name'])
+            fill_colors[0].append('white')
+
+        for col_idx, metric_key in cols_data.items():
+            values = [r.get(metric_key, 0) for r in results]
+
+            if higher_is_better[col_idx]:
+                best_val = max(values)
+                worst_val = min(values)
+            else:
+                best_val = min(values)
+                worst_val = max(values)
+
+            for i, val in enumerate(values):
+                if col_idx in [1, 2]:
+                    cell_values[col_idx].append(f'{val:.2f}%')
+                elif col_idx == 3:
+                    cell_values[col_idx].append(f'{val:.6f}')
+                elif col_idx == 4:
+                    cell_values[col_idx].append(f'{val:.4f}')
+                else:
+                    cell_values[col_idx].append(f'{val:.4f}')
+
+                if len(results) > 1 and val == best_val:
+                    fill_colors[col_idx].append('#d4edda')
+                elif len(results) > 1 and val == worst_val:
+                    fill_colors[col_idx].append('#f8d7da')
+                else:
+                    fill_colors[col_idx].append('white')
+
+        fig = go.Figure(data=[go.Table(
+            header=dict(
+                values=headers,
+                fill_color='#4472c4',
+                font=dict(color='white', size=12),
+                align='center',
+                height=35
+            ),
+            cells=dict(
+                values=cell_values,
+                fill_color=fill_colors,
+                align='center',
+                font=dict(size=11),
+                height=30
+            )
+        )])
+
+        fig.update_layout(
+            title=dict(
+                text='攻击方法对比结果',
+                x=0.5,
+                xanchor='center'
+            ),
+            height=300 + len(results) * 35
+        )
+
+        return fig
