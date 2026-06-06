@@ -246,24 +246,26 @@ class AdversarialTrainer:
         robust_correct = 0
         total = 0
 
-        with torch.no_grad():
-            for images, labels in dataloader:
-                images = images.to(DEVICE)
-                labels = labels.to(DEVICE)
-                batch_size = labels.size(0)
+        for images, labels in dataloader:
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
+            batch_size = labels.size(0)
 
+            with torch.no_grad():
                 clean_outputs = self.model(normalize_image(images))
                 clean_preds = clean_outputs.argmax(1)
                 clean_mask = clean_preds == labels
                 clean_correct += clean_mask.sum().item()
                 total += batch_size
 
-                if clean_mask.sum() > 0:
-                    clean_images = images[clean_mask]
-                    clean_labels = labels[clean_mask]
+            if clean_mask.sum() > 0:
+                clean_images = images[clean_mask]
+                clean_labels = labels[clean_mask]
 
-                    self.eval_adversary.model = self.model
-                    adv_images = self.eval_adversary.generate(clean_images, clean_labels)
+                self.eval_adversary.model = self.model
+                adv_images = self.eval_adversary.generate(clean_images, clean_labels)
+
+                with torch.no_grad():
                     adv_outputs = self.model(normalize_image(adv_images))
                     adv_preds = adv_outputs.argmax(1)
                     robust_correct += (adv_preds == clean_labels).sum().item()
