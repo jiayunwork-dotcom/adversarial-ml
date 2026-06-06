@@ -682,6 +682,71 @@ def run_attack_comparison(model_id, dataset_id, attack_methods, epsilon,
         return None, None, f"对比实验失败: {str(e)}"
 
 
+CUSTOM_CSS = """
+.tab-container,
+div[role="tablist"],
+div.tab-container,
+.svelte-tabs [role="tablist"] {
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    flex-wrap: nowrap !important;
+    -webkit-overflow-scrolling: touch !important;
+    scrollbar-width: thin !important;
+    display: flex !important;
+    width: 100% !important;
+}
+
+.tab-container::-webkit-scrollbar,
+div[role="tablist"]::-webkit-scrollbar {
+    height: 6px !important;
+}
+
+.tab-container::-webkit-scrollbar-track,
+div[role="tablist"]::-webkit-scrollbar-track {
+    background: #f1f1f1 !important;
+    border-radius: 3px !important;
+}
+
+.tab-container::-webkit-scrollbar-thumb,
+div[role="tablist"]::-webkit-scrollbar-thumb {
+    background: #888 !important;
+    border-radius: 3px !important;
+}
+
+.tab-container::-webkit-scrollbar-thumb:hover,
+div[role="tablist"]::-webkit-scrollbar-thumb:hover {
+    background: #555 !important;
+}
+
+div[role="tab"],
+button[role="tab"],
+.tabitem {
+    flex-shrink: 0 !important;
+    white-space: nowrap !important;
+    min-width: fit-content !important;
+}
+
+.tabs .tab-nav,
+.tabs > div[role="tablist"] {
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    flex-wrap: nowrap !important;
+    display: flex !important;
+}
+
+.gradio-container .tab-container {
+    overflow-x: auto !important;
+    flex-wrap: nowrap !important;
+}
+
+.tab-container > button,
+.tab-container > [role="tab"] {
+    flex-shrink: 0 !important;
+    white-space: nowrap !important;
+}
+"""
+
+
 def create_app():
     with gr.Blocks(title="对抗样本生成与模型鲁棒性评估平台") as app:
         gr.Markdown("# 🛡️ 对抗样本生成与模型鲁棒性评估平台")
@@ -1122,4 +1187,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
+        css=CUSTOM_CSS,
     )
