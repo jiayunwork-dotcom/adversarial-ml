@@ -685,16 +685,17 @@ def run_attack_comparison(model_id, dataset_id, attack_methods, epsilon,
 
 
 def start_adversarial_training(model_id, dataset_id, method, epochs, learning_rate,
-                               batch_size, attack_steps, epsilon, beta, resume):
+                               batch_size, attack_steps, epsilon, beta, resume,
+                               early_stopping, patience):
     if not model_id:
-        return "请选择模型", None, None, None
+        return "请选择模型", None, None, None, None, None
     if not dataset_id:
-        return "请选择数据集", None, None, None
+        return "请选择数据集", None, None, None, None, None
 
     try:
         model_info = model_manager.get_model(model_id)
         if model_info and model_info.is_onnx:
-            return "ONNX模型不支持对抗训练", None, None, None
+            return "ONNX模型不支持对抗训练", None, None, None, None, None
 
         task = training_manager.create_training_task(
             model_id=model_id,
@@ -706,7 +707,9 @@ def start_adversarial_training(model_id, dataset_id, method, epochs, learning_ra
             attack_steps=int(attack_steps),
             epsilon=float(epsilon) / 255.0,
             beta=float(beta),
-            resume_from_checkpoint=resume
+            resume_from_checkpoint=resume,
+            early_stopping=early_stopping,
+            patience=int(patience)
         )
 
         training_manager.start_training(task.id)
@@ -715,35 +718,39 @@ def start_adversarial_training(model_id, dataset_id, method, epochs, learning_ra
             f"训练已开始！任务ID: {task.id}\n"
             f"模型: {task.original_model_name}\n"
             f"方法: {'PGD-AT' if method == 'pgd_at' else 'TRADES'}\n"
-            f"轮数: {epochs}",
+            f"轮数: {epochs}"
+            f"{f'\n早停: 启用 (patience={patience})' if early_stopping else '\n早停: 未启用'}",
             task.id,
             refresh_training_task_list(),
+            None,
+            None,
             None
         )
     except Exception as e:
-        return f"启动训练失败: {str(e)}", None, refresh_training_task_list(), None
+        return f"启动训练失败: {str(e)}", None, refresh_training_history_table(), None, None, None
 
 
 def stop_training(task_id):
     if not task_id:
-        return "请提供任务ID", refresh_training_task_list()
+        return "请提供任务ID", refresh_training_history_table()
 
     try:
         if training_manager.stop_training(task_id):
-            return f"已发送终止信号，任务 {task_id} 将在当前batch结束后停止", refresh_training_task_list()
+            return f"已发送终止信号，任务 {task_id} 将在当前batch结束后停止", refresh_training_history_table()
         else:
-            return "任务未在运行或不存在", refresh_training_task_list()
+            return "任务未在运行或不存在", refresh_training_history_table()
     except Exception as e:
-        return f"终止失败: {str(e)}", refresh_training_task_list()
+        return f"终止失败: {str(e)}", refresh_training_history_table()
 
 
 def update_training_logs(task_id):
     if not task_id:
-        return "", None
+        return "", None, None, None
 
     try:
         logs = training_manager.get_training_logs(task_id)
         status = training_manager.get_training_status(task_id)
+        history = training_manager.get_training_history(task_id)
 
         log_text = ""
         for log in logs:
@@ -755,10 +762,22 @@ def update_training_logs(task_id):
         if comparison:
             comparison_html = create_comparison_table_html(comparison)
 
+        loss_fig = None
+        acc_fig = None
+
+        if history["epochs"]:
+            task_name = history["task_info"]["model_name"]
+            loss_fig = visualizer.create_training_loss_curve(
+                history["epochs"], history["losses"], task_name
+            )
+            acc_fig = visualizer.create_training_accuracy_curve(
+                history["epochs"], history["clean_accs"], history["robust_accs"], task_name
+            )
+
         status_text = f"\n=== 当前状态: {status.value.upper()} ===\n"
-        return log_text + status_text, comparison_html
+        return log_text + status_text, comparison_html, loss_fig, acc_fig
     except Exception as e:
-        return f"获取日志失败: {str(e)}", None
+        return f"获取日志失败: {str(e)}", None, None, None
 
 
 def create_comparison_table_html(comparison):
@@ -836,6 +855,69 @@ def refresh_training_task_list():
         "任务ID", "模型名称", "训练方法", "总轮数", "状态", "开始时间", "结束时间"
     ])
     return df
+
+
+def refresh_training_history_table():
+    tasks = training_manager.list_tasks()
+
+    data = []
+    for task in tasks:
+        status_map = {
+            "pending": "⏳ 等待中",
+            "running": "▶️ 运行中",
+            "completed": "✅ 完成",
+            "stopped": "⏹️ 已终止",
+            "error": "❌ 错误"
+        }
+        status_display = status_map.get(task.status.value, task.status.value)
+        method_display = "PGD-AT" if task.config.method == "pgd_at" else "TRADES"
+
+        clean_acc = "-"
+        robust_acc = "-"
+        if task.trained_metrics:
+            clean_acc = f"{task.trained_metrics.get('clean_accuracy', 0):.2f}%"
+            robust_acc = f"{task.trained_metrics.get('robust_accuracy', 0):.2f}%"
+
+        data.append([
+            False,
+            task.id,
+            task.start_time or "-",
+            task.original_model_name,
+            method_display,
+            f"{task.config.epochs}",
+            clean_acc,
+            robust_acc,
+            status_display,
+        ])
+
+    df = pd.DataFrame(data, columns=[
+        "选择", "任务ID", "时间", "原始模型", "方法", "Epochs",
+        "最终Clean Acc", "最终Robust Acc", "状态"
+    ])
+    return df
+
+
+def compare_training_tasks(selected_df):
+    if selected_df is None or len(selected_df) == 0:
+        return None
+
+    selected_rows = selected_df[selected_df["选择"] == True]
+
+    if len(selected_rows) != 2:
+        gr.Warning("请恰好选择2条训练任务进行对比")
+        return None
+
+    task_ids = selected_rows["任务ID"].tolist()
+
+    history1 = training_manager.get_training_history(task_ids[0])
+    history2 = training_manager.get_training_history(task_ids[1])
+
+    if not history1["epochs"] or not history2["epochs"]:
+        gr.Warning("选中的任务没有足够的训练数据")
+        return None
+
+    comparison_fig = visualizer.create_training_comparison_charts(history1, history2)
+    return comparison_fig
 
 
 def get_pgd_only_params_ui(method):
@@ -1402,6 +1484,19 @@ def create_app():
                         )
 
                         with gr.Row():
+                            early_stopping_cb = gr.Checkbox(
+                                value=False,
+                                label="启用早停"
+                            )
+                            patience_slider = gr.Slider(
+                                minimum=1,
+                                maximum=20,
+                                value=5,
+                                step=1,
+                                label="早停 patience (连续无提升轮数)"
+                            )
+
+                        with gr.Row():
                             start_train_btn = gr.Button("开始对抗训练", variant="primary")
                             stop_train_btn = gr.Button("终止训练", variant="stop")
 
@@ -1409,23 +1504,42 @@ def create_app():
                         training_status = gr.Textbox(label="训练状态", interactive=False, lines=5)
 
                     with gr.Column(scale=1.5):
+                        gr.Markdown("### 训练曲线")
+                        with gr.Row():
+                            loss_chart = gr.Plot(label="Loss 曲线")
+                            accuracy_chart = gr.Plot(label="Accuracy 曲线")
+
                         gr.Markdown("### 训练日志")
                         training_logs = gr.Textbox(
                             label="实时训练日志",
                             interactive=False,
-                            lines=25,
-                            max_lines=25,
+                            lines=15,
+                            max_lines=15,
                             autoscroll=True
                         )
 
                         training_comparison = gr.HTML(label="训练结果对比")
 
-                        gr.Markdown("### 训练任务列表")
-                        training_task_list = gr.Dataframe(
-                            interactive=False,
-                            label="历史训练任务"
-                        )
+                        gr.Markdown("### 历史训练记录")
+                        with gr.Row():
+                            training_history_table = gr.Dataframe(
+                                interactive=True,
+                                label="历史训练任务（勾选2条进行对比）",
+                                col_count=(9, "fixed"),
+                                col_labels=[
+                                    "选择", "任务ID", "时间", "原始模型", "方法", "Epochs",
+                                    "最终Clean Acc", "最终Robust Acc", "状态"
+                                ],
+                                col_widths=[40, 120, 150, 120, 80, 60, 100, 110, 80],
+                                datatype=["bool", "str", "str", "str", "str", "str", "str", "str", "str"],
+                                wrap=True
+                            )
+                            with gr.Column(scale=0.3):
+                                compare_train_btn = gr.Button("对比选中任务", variant="primary")
+                                clear_selection_btn = gr.Button("清除选择")
+
                         refresh_train_tasks_btn = gr.Button("刷新任务列表")
+                        training_comparison_chart = gr.Plot(label="训练对比图表")
 
                 start_train_btn.click(
                     start_adversarial_training,
@@ -1433,20 +1547,25 @@ def create_app():
                         model_select_train, dataset_select_train, train_method,
                         epochs_train, learning_rate_train, batch_size_train,
                         attack_steps_train, epsilon_train, beta_train,
-                        resume_checkpoint
+                        resume_checkpoint, early_stopping_cb, patience_slider
                     ],
-                    outputs=[training_status, training_task_id, training_task_list, training_comparison]
+                    outputs=[training_status, training_task_id, training_history_table, training_comparison, loss_chart, accuracy_chart]
                 )
 
                 stop_train_btn.click(
                     stop_training,
                     inputs=[training_task_id],
-                    outputs=[training_status, training_task_list]
+                    outputs=[training_status, training_history_table]
                 )
 
                 refresh_train_tasks_btn.click(
-                    refresh_training_task_list,
-                    outputs=training_task_list
+                    refresh_training_history_table,
+                    outputs=training_history_table
+                )
+
+                clear_selection_btn.click(
+                    lambda: refresh_training_history_table(),
+                    outputs=training_history_table
                 )
 
                 def poll_logs(task_id):
@@ -1455,14 +1574,21 @@ def create_app():
                 training_task_id.change(
                     poll_logs,
                     inputs=[training_task_id],
-                    outputs=[training_logs, training_comparison],
+                    outputs=[training_logs, training_comparison, loss_chart, accuracy_chart],
                     every=2.0
+                )
+
+                compare_train_btn.click(
+                    compare_training_tasks,
+                    inputs=[training_history_table],
+                    outputs=[training_comparison_chart]
                 )
 
         app.load(refresh_model_list, outputs=model_list)
         app.load(refresh_dataset_list, outputs=dataset_list)
         app.load(get_experiment_records, outputs=experiment_table)
         app.load(refresh_training_task_list, outputs=training_task_list)
+        app.load(refresh_training_history_table, outputs=training_history_table)
 
     return app
 

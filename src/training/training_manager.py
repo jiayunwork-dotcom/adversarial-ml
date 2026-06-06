@@ -43,6 +43,7 @@ class TrainingTask:
     end_time: Optional[str] = None
     error_message: Optional[str] = None
     resume_from_checkpoint: bool = False
+    training_info: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,6 +61,7 @@ class TrainingTask:
             "end_time": self.end_time,
             "error_message": self.error_message,
             "resume_from_checkpoint": self.resume_from_checkpoint,
+            "training_info": self.training_info,
         }
 
     @classmethod
@@ -82,6 +84,7 @@ class TrainingTask:
             end_time=data.get("end_time"),
             error_message=data.get("error_message"),
             resume_from_checkpoint=data.get("resume_from_checkpoint", False),
+            training_info=data.get("training_info"),
         )
         return task
 
@@ -245,7 +248,9 @@ class TrainingManager:
                              method: str, epochs: int, learning_rate: float,
                              batch_size: int, attack_steps: int,
                              epsilon: float, beta: float = 6.0,
-                             resume_from_checkpoint: bool = False
+                             resume_from_checkpoint: bool = False,
+                             early_stopping: bool = False,
+                             patience: int = 5
                              ) -> TrainingTask:
         model_info = self.model_manager.get_model(model_id)
         if not model_info:
@@ -268,6 +273,8 @@ class TrainingManager:
             beta=beta,
             input_size=model_info.input_size,
             num_classes=model_info.num_classes,
+            early_stopping=early_stopping,
+            patience=patience,
         )
 
         task_id = generate_id()
@@ -330,20 +337,32 @@ class TrainingManager:
             def log_callback(log: TrainingLog):
                 self._append_log(task_id, log)
 
-            trained_model, all_logs = trainer.train(
+            trained_model, all_logs, training_info = trainer.train(
                 train_dataset, val_dataset, task_id,
                 log_callback=log_callback,
                 start_epoch=start_epoch
             )
 
-            if trainer._stop_requested:
+            task.training_info = training_info
+
+            if training_info["early_stopped"]:
+                task.status = TrainingStatus.STOPPED
+                best_epoch = training_info["best_epoch"]
+                print(f"Loading best checkpoint from epoch {best_epoch}")
+                best_checkpoint_path = os.path.join(
+                    CHECKPOINT_DIR, f"{task_id}_epoch_{best_epoch}.pt"
+                )
+                if os.path.exists(best_checkpoint_path):
+                    trainer.load_checkpoint(best_checkpoint_path)
+                    trained_model = trainer.model
+            elif trainer._stop_requested:
                 task.status = TrainingStatus.STOPPED
             else:
                 task.status = TrainingStatus.COMPLETED
 
             task.end_time = time.strftime("%Y-%m-%d %H:%M:%S")
 
-            if task.status == TrainingStatus.COMPLETED:
+            if task.status in [TrainingStatus.COMPLETED, TrainingStatus.STOPPED] and trained_model is not None:
                 trained_model.eval()
                 result_model_id = self._save_trained_model(
                     trained_model, task.original_model_id, task.config
@@ -417,3 +436,46 @@ class TrainingManager:
         if log.robust_acc is not None:
             msg += f", Robust Acc: {log.robust_acc:.2f}%"
         return msg
+
+    def get_training_history(self, task_id: str) -> Dict[str, Any]:
+        task = self._tasks.get(task_id)
+        if not task:
+            return {"epochs": [], "losses": [], "clean_accs": [], "robust_accs": []}
+
+        epochs = []
+        losses = []
+        clean_accs = []
+        robust_accs = []
+
+        epoch_data = {}
+        for log in task.logs:
+            if log.clean_acc is not None and log.robust_acc is not None:
+                epoch_data[log.epoch] = {
+                    "loss": log.loss,
+                    "clean_acc": log.clean_acc,
+                    "robust_acc": log.robust_acc
+                }
+
+        for epoch in sorted(epoch_data.keys()):
+            epochs.append(epoch)
+            losses.append(epoch_data[epoch]["loss"])
+            clean_accs.append(epoch_data[epoch]["clean_acc"])
+            robust_accs.append(epoch_data[epoch]["robust_acc"])
+
+        return {
+            "epochs": epochs,
+            "losses": losses,
+            "clean_accs": clean_accs,
+            "robust_accs": robust_accs,
+            "task_info": {
+                "id": task.id,
+                "model_name": task.original_model_name,
+                "method": task.config.method,
+                "epochs": task.config.epochs,
+                "status": task.status.value,
+                "start_time": task.start_time,
+                "end_time": task.end_time,
+                "training_info": task.training_info,
+                "trained_metrics": task.trained_metrics,
+            }
+        }

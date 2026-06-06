@@ -358,3 +358,194 @@ class Visualizer:
         )
 
         return fig
+
+    def create_training_loss_curve(self, epochs: List[int], losses: List[float],
+                                   task_name: str = "Training") -> go.Figure:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=epochs,
+            y=losses,
+            mode='lines+markers',
+            name='Training Loss',
+            line=dict(color='rgb(55, 83, 109)', width=2),
+            marker=dict(size=8, symbol='circle'),
+            hovertemplate='Epoch %{x}<br>Loss: %{y:.4f}<extra></extra>'
+        ))
+
+        fig.update_layout(
+            title=dict(
+                text=f'{task_name} - Loss Curve',
+                x=0.5,
+                xanchor='center'
+            ),
+            xaxis=dict(
+                title='Epoch',
+                tickmode='linear',
+                tick0=1,
+                dtick=1
+            ),
+            yaxis=dict(
+                title='Average Loss'
+            ),
+            hovermode='x unified',
+            legend=dict(
+                orientation='h',
+                yanchor='bottom',
+                y=1.02,
+                xanchor='right',
+                x=1
+            ),
+            margin=dict(l=50, r=50, t=60, b=50)
+        )
+
+        return fig
+
+    def create_training_accuracy_curve(self, epochs: List[int],
+                                       clean_accs: List[float],
+                                       robust_accs: List[float],
+                                       task_name: str = "Training") -> go.Figure:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=epochs,
+            y=clean_accs,
+            mode='lines+markers',
+            name='Clean Accuracy',
+            line=dict(color='rgb(26, 118, 255)', width=2),
+            marker=dict(size=8, symbol='circle'),
+            hovertemplate='Epoch %{x}<br>Clean Acc: %{y:.2f}%<extra></extra>'
+        ))
+        fig.add_trace(go.Scatter(
+            x=epochs,
+            y=robust_accs,
+            mode='lines+markers',
+            name='Robust Accuracy',
+            line=dict(color='rgb(255, 65, 54)', width=2),
+            marker=dict(size=8, symbol='square'),
+            hovertemplate='Epoch %{x}<br>Robust Acc: %{y:.2f}%<extra></extra>'
+        ))
+
+        fig.update_layout(
+            title=dict(
+                text=f'{task_name} - Accuracy Curve',
+                x=0.5,
+                xanchor='center'
+            ),
+            xaxis=dict(
+                title='Epoch',
+                tickmode='linear',
+                tick0=1,
+                dtick=1
+            ),
+            yaxis=dict(
+                title='Accuracy (%)',
+                range=[0, 100]
+            ),
+            hovermode='x unified',
+            legend=dict(
+                orientation='h',
+                yanchor='bottom',
+                y=1.02,
+                xanchor='right',
+                x=1
+            ),
+            margin=dict(l=50, r=50, t=60, b=50)
+        )
+
+        return fig
+
+    def create_training_comparison_charts(self,
+                                          history1: Dict[str, Any],
+                                          history2: Dict[str, Any]) -> go.Figure:
+        from plotly.subplots import make_subplots
+
+        fig = make_subplots(rows=1, cols=2,
+                            subplot_titles=('Loss Curve Comparison', 'Accuracy Curve Comparison'),
+                            horizontal_spacing=0.15)
+
+        name1 = f"{history1['task_info']['model_name']} ({history1['task_info']['id'][:8]})"
+        name2 = f"{history2['task_info']['model_name']} ({history2['task_info']['id'][:8]})"
+
+        fig.add_trace(go.Scatter(
+            x=history1['epochs'],
+            y=history1['losses'],
+            mode='lines+markers',
+            name=f'{name1} - Loss',
+            line=dict(color='rgb(55, 83, 109)', width=2),
+            marker=dict(size=6, symbol='circle'),
+            legendgroup='loss'
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=history2['epochs'],
+            y=history2['losses'],
+            mode='lines+markers',
+            name=f'{name2} - Loss',
+            line=dict(color='rgb(255, 127, 14)', width=2, dash='dash'),
+            marker=dict(size=6, symbol='square'),
+            legendgroup='loss'
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=history1['epochs'],
+            y=history1['clean_accs'],
+            mode='lines+markers',
+            name=f'{name1} - Clean Acc',
+            line=dict(color='rgb(26, 118, 255)', width=2),
+            marker=dict(size=6, symbol='circle'),
+            legendgroup='acc'
+        ), row=1, col=2)
+
+        fig.add_trace(go.Scatter(
+            x=history1['epochs'],
+            y=history1['robust_accs'],
+            mode='lines+markers',
+            name=f'{name1} - Robust Acc',
+            line=dict(color='rgb(255, 65, 54)', width=2),
+            marker=dict(size=6, symbol='circle'),
+            legendgroup='acc'
+        ), row=1, col=2)
+
+        fig.add_trace(go.Scatter(
+            x=history2['epochs'],
+            y=history2['clean_accs'],
+            mode='lines+markers',
+            name=f'{name2} - Clean Acc',
+            line=dict(color='rgb(26, 118, 255)', width=2, dash='dash'),
+            marker=dict(size=6, symbol='square'),
+            legendgroup='acc'
+        ), row=1, col=2)
+
+        fig.add_trace(go.Scatter(
+            x=history2['epochs'],
+            y=history2['robust_accs'],
+            mode='lines+markers',
+            name=f'{name2} - Robust Acc',
+            line=dict(color='rgb(255, 65, 54)', width=2, dash='dash'),
+            marker=dict(size=6, symbol='square'),
+            legendgroup='acc'
+        ), row=1, col=2)
+
+        fig.update_xaxes(title_text='Epoch', row=1, col=1, tickmode='linear', tick0=1, dtick=1)
+        fig.update_xaxes(title_text='Epoch', row=1, col=2, tickmode='linear', tick0=1, dtick=1)
+        fig.update_yaxes(title_text='Average Loss', row=1, col=1)
+        fig.update_yaxes(title_text='Accuracy (%)', row=1, col=2, range=[0, 100])
+
+        fig.update_layout(
+            title=dict(
+                text='Training History Comparison',
+                x=0.5,
+                xanchor='center'
+            ),
+            height=500,
+            width=1200,
+            hovermode='x unified',
+            legend=dict(
+                orientation='h',
+                yanchor='bottom',
+                y=-0.2,
+                xanchor='center',
+                x=0.5
+            )
+        )
+
+        return fig

@@ -26,6 +26,8 @@ class TrainingConfig:
     beta: float = 6.0
     input_size: int = 32
     num_classes: int = 10
+    early_stopping: bool = False
+    patience: int = 5
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -38,6 +40,8 @@ class TrainingConfig:
             "beta": self.beta,
             "input_size": self.input_size,
             "num_classes": self.num_classes,
+            "early_stopping": self.early_stopping,
+            "patience": self.patience,
         }
 
 
@@ -325,7 +329,7 @@ class AdversarialTrainer:
 
     def train(self, train_dataset: Dataset, val_dataset: Dataset, training_id: str,
               log_callback: Optional[Callable[[TrainingLog], None]] = None,
-              start_epoch: int = 0) -> Tuple[nn.Module, List[TrainingLog]]:
+              start_epoch: int = 0) -> Tuple[nn.Module, List[TrainingLog], Dict[str, Any]]:
         self._is_running = True
         self._stop_requested = False
         all_logs = []
@@ -344,6 +348,11 @@ class AdversarialTrainer:
             num_workers=0
         )
 
+        best_robust_acc = 0.0
+        best_epoch = 0
+        patience_counter = 0
+        early_stopped = False
+
         for epoch in range(start_epoch, self.config.epochs):
             if self._stop_requested:
                 print(f"Training stopped at epoch {epoch}")
@@ -357,12 +366,13 @@ class AdversarialTrainer:
 
             clean_acc, robust_acc = self.evaluate(val_loader)
 
+            epoch_loss = np.mean([log.loss for log in epoch_logs]) if epoch_logs else 0.0
             eval_log = TrainingLog(
                 epoch=epoch + 1,
                 total_epochs=self.config.epochs,
                 batch=len(train_loader),
                 total_batches=len(train_loader),
-                loss=epoch_logs[-1].loss if epoch_logs else 0.0,
+                loss=epoch_loss,
                 clean_acc=clean_acc,
                 robust_acc=robust_acc
             )
@@ -375,5 +385,40 @@ class AdversarialTrainer:
 
             self.save_checkpoint(epoch + 1, training_id)
 
+            if self.config.early_stopping:
+                if robust_acc > best_robust_acc:
+                    best_robust_acc = robust_acc
+                    best_epoch = epoch + 1
+                    patience_counter = 0
+                    print(f"New best robust accuracy: {best_robust_acc:.2f}% at epoch {best_epoch}")
+                else:
+                    patience_counter += 1
+                    print(f"Patience: {patience_counter}/{self.config.patience}")
+
+                if patience_counter >= self.config.patience:
+                    early_stopped = True
+                    stop_msg = f"Early stopping triggered at epoch {epoch + 1}, best robust accuracy: {best_robust_acc:.2f}%"
+                    print(stop_msg)
+                    if log_callback:
+                        stop_log = TrainingLog(
+                            epoch=epoch + 1,
+                            total_epochs=self.config.epochs,
+                            batch=len(train_loader),
+                            total_batches=len(train_loader),
+                            loss=epoch_loss,
+                            clean_acc=clean_acc,
+                            robust_acc=robust_acc
+                        )
+                        all_logs.append(stop_log)
+                    break
+
         self._is_running = False
-        return self.model, all_logs
+
+        training_info = {
+            "best_robust_acc": best_robust_acc,
+            "best_epoch": best_epoch,
+            "early_stopped": early_stopped,
+            "final_epoch": epoch + 1 if early_stopped or self._stop_requested else self.config.epochs
+        }
+
+        return self.model, all_logs, training_info
