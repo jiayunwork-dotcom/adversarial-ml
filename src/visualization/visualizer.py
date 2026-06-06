@@ -1,0 +1,233 @@
+from typing import Dict, Any, List, Optional, Tuple
+
+import numpy as np
+import torch
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.graph_objects as go
+import plotly.express as px
+from PIL import Image, ImageDraw, ImageFont
+
+from src.utils.helpers import tensor_to_image, get_imagenet_labels
+
+
+class Visualizer:
+    def __init__(self):
+        sns.set_style("whitegrid")
+
+    def create_adv_comparison(self, original: torch.Tensor, adversarial: torch.Tensor,
+                              clean_pred: int, adv_pred: int, true_label: Optional[int] = None,
+                              clean_conf: float = 0.0, adv_conf: float = 0.0,
+                              labels: Optional[List[str]] = None) -> Image.Image:
+        if labels is None:
+            labels = get_imagenet_labels()
+
+        orig_img = tensor_to_image(original, denormalize=False)
+        adv_img = tensor_to_image(adversarial, denormalize=False)
+
+        perturbation = (adversarial - original).squeeze(0).detach()
+        pert_np = perturbation.permute(1, 2, 0).cpu().numpy()
+        pert_np = (pert_np - pert_np.min()) / (pert_np.max() - pert_np.min() + 1e-8)
+        pert_img = (pert_np * 255).astype(np.uint8)
+
+        linf = torch.max(torch.abs(perturbation)).item()
+        l2 = torch.norm(perturbation.view(-1), p=2).item()
+
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+        axes[0].imshow(orig_img)
+        clean_label_name = labels[clean_pred] if clean_pred < len(labels) else f"class_{clean_pred}"
+        title = f"原图\n预测: {clean_label_name} ({clean_pred})\n置信度: {clean_conf:.2f}"
+        if true_label is not None:
+            true_name = labels[true_label] if true_label < len(labels) else f"class_{true_label}"
+            title += f"\n真实: {true_name} ({true_label})"
+        axes[0].set_title(title, fontsize=10)
+        axes[0].axis('off')
+
+        axes[1].imshow(pert_img)
+        axes[1].set_title(f"扰动 (放大)\nL∞: {linf:.4f}\nL2: {l2:.4f}", fontsize=10)
+        axes[1].axis('off')
+
+        axes[2].imshow(adv_img)
+        adv_label_name = labels[adv_pred] if adv_pred < len(labels) else f"class_{adv_pred}"
+        success = adv_pred != clean_pred
+        status = "✓ 攻击成功" if success else "✗ 攻击失败"
+        color = "red" if success else "green"
+        title = f"对抗样本\n预测: {adv_label_name} ({adv_pred})\n置信度: {adv_conf:.2f}\n{status}"
+        axes[2].set_title(title, fontsize=10, color=color)
+        axes[2].axis('off')
+
+        plt.tight_layout()
+
+        buf = plt.savefig_to_buffer() if hasattr(plt, 'savefig_to_buffer') else None
+        if buf is None:
+            import io
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            buf.seek(0)
+
+        comparison_img = Image.open(buf)
+        plt.close(fig)
+        return comparison_img
+
+    def create_accuracy_bar_chart(self, clean_acc: float, robust_acc: float) -> go.Figure:
+        fig = go.Figure(data=[
+            go.Bar(name='Clean Accuracy', x=['Clean'], y=[clean_acc],
+                   marker_color='rgb(55, 83, 109)'),
+            go.Bar(name='Robust Accuracy', x=['Robust'], y=[robust_acc],
+                   marker_color='rgb(26, 118, 255)')
+        ])
+        fig.update_layout(
+            title='Clean vs Robust Accuracy',
+            yaxis_title='Accuracy (%)',
+            barmode='group',
+            yaxis_range=[0, 100]
+        )
+        return fig
+
+    def create_per_class_heatmap(self, per_class_robust: Dict[int, float],
+                                 labels: Optional[List[str]] = None) -> go.Figure:
+        if labels is None:
+            labels = get_imagenet_labels()
+
+        classes = sorted(per_class_robust.keys())
+        values = [per_class_robust[c] for c in classes]
+        class_names = [labels[c] if c < len(labels) else f"class_{c}" for c in classes]
+
+        n_cols = min(10, len(classes))
+        n_rows = (len(classes) + n_cols - 1) // n_cols
+
+        values_matrix = np.zeros((n_rows, n_cols))
+        labels_matrix = np.empty((n_rows, n_cols), dtype=object)
+
+        for i, (cls, val, name) in enumerate(zip(classes, values, class_names)):
+            row = i // n_cols
+            col = i % n_cols
+            values_matrix[row, col] = val
+            labels_matrix[row, col] = f"{name}<br>{val:.1f}%"
+
+        fig = px.imshow(
+            values_matrix,
+            text_auto=False,
+            color_continuous_scale='RdYlGn',
+            range_color=[0, 100],
+            title='Per-Class Robustness (%)'
+        )
+
+        fig.update_traces(text=labels_matrix, texttemplate="%{text}")
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
+
+        return fig
+
+    def create_perturbation_histogram(self, perturbations: List[float],
+                                      title: str = "Perturbation Distribution") -> go.Figure:
+        fig = go.Figure(data=[go.Histogram(x=perturbations, nbinsx=30)])
+        fig.update_layout(
+            title=title,
+            xaxis_title='Perturbation (L2)',
+            yaxis_title='Count',
+            bargap=0.2
+        )
+        return fig
+
+    def create_transferability_heatmap(self, matrix: np.ndarray,
+                                       model_names: List[str]) -> go.Figure:
+        fig = go.Figure(data=go.Heatmap(
+            z=matrix,
+            x=model_names,
+            y=model_names,
+            hoverongaps=False,
+            colorscale='Viridis',
+            text=[[f"{v:.1f}%" for v in row] for row in matrix * 100],
+            texttemplate="%{text}",
+        ))
+        fig.update_layout(
+            title='Transferability Matrix (%)',
+            xaxis_title='Target Model',
+            yaxis_title='Source Model',
+        )
+        return fig
+
+    def create_metrics_comparison_table(self, metrics_list: List[Dict[str, Any]],
+                                       names: List[str]) -> go.Figure:
+        metric_keys = ["clean_accuracy", "robust_accuracy", "attack_success_rate",
+                       "average_perturbation_l2"]
+        metric_names = ["Clean Acc", "Robust Acc", "Attack Success", "Avg Pert (L2)"]
+
+        values = []
+        for metrics in metrics_list:
+            row = []
+            for key in metric_keys:
+                val = metrics.get(key, 0)
+                if "accuracy" in key or "success" in key:
+                    row.append(f"{val:.2f}%")
+                else:
+                    row.append(f"{val:.4f}")
+            values.append(row)
+
+        fig = go.Figure(data=[go.Table(
+            header=dict(values=["Model"] + metric_names,
+                        fill_color='paleturquoise',
+                        align='left'),
+            cells=dict(values=[names] + list(map(list, zip(*values))),
+                       fill_color='lavender',
+                       align='left'))
+        ])
+        fig.update_layout(title="Metrics Comparison")
+        return fig
+
+    def create_defense_comparison_figure(self, original_metrics: Dict[str, Any],
+                                         defense_metrics: Dict[str, Any]) -> go.Figure:
+        keys = ["clean_accuracy", "robust_accuracy", "attack_success_rate"]
+        names = ["Clean Accuracy", "Robust Accuracy", "Attack Success Rate"]
+
+        orig_vals = [original_metrics.get(k, 0) for k in keys]
+        def_vals = [defense_metrics.get(k, 0) for k in keys]
+        improvements = [def_vals[i] - orig_vals[i] if "success" not in keys[i]
+                        else orig_vals[i] - def_vals[i] for i in range(len(keys))]
+
+        colors = ['green' if imp >= 0 else 'red' for imp in improvements]
+
+        fig = go.Figure(data=[
+            go.Bar(name='Original', x=names, y=orig_vals, marker_color='rgb(107, 107, 107)'),
+            go.Bar(name='After Defense', x=names, y=def_vals, marker_color=colors)
+        ])
+        fig.update_layout(
+            title='Defense Effect Comparison',
+            yaxis_title='Percentage (%)',
+            barmode='group'
+        )
+        return fig
+
+    def create_thumbnail_grid(self, results: List[Dict[str, Any]],
+                              n_cols: int = 5) -> Image.Image:
+        n_rows = (len(results) + n_cols - 1) // n_cols
+        thumb_size = 128
+        margin = 5
+        total_w = n_cols * (thumb_size + margin) + margin
+        total_h = n_rows * (thumb_size + margin) + margin
+
+        grid = Image.new('RGB', (total_w, total_h), color='white')
+
+        for i, result in enumerate(results):
+            row = i // n_cols
+            col = i % n_cols
+            x = margin + col * (thumb_size + margin)
+            y = margin + row * (thumb_size + margin)
+
+            img = tensor_to_image(result['adversarial'], denormalize=False)
+            img_pil = Image.fromarray(img).resize((thumb_size, thumb_size))
+
+            draw = ImageDraw.Draw(img_pil)
+            success = result.get('success', False)
+            border_color = 'red' if success else 'green'
+            border_width = 3
+            draw.rectangle([(0, 0), (thumb_size-1, thumb_size-1)],
+                         outline=border_color, width=border_width)
+
+            grid.paste(img_pil, (x, y))
+
+        return grid
