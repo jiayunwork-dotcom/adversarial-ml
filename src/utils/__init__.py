@@ -8,6 +8,7 @@ from .helpers import (
     load_json,
     generate_id,
     get_model_architecture,
+    compute_perturbation_metrics,
 )
 from .experiment_manager import ExperimentManager
 from .preset_manager import PresetManager

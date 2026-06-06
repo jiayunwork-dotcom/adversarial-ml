@@ -587,7 +587,7 @@ def get_attack_params_ui(attack_method):
 
 
 def create_app():
-    with gr.Blocks(title="对抗样本生成与模型鲁棒性评估平台", theme=gr.themes.Soft()) as app:
+    with gr.Blocks(title="对抗样本生成与模型鲁棒性评估平台") as app:
         gr.Markdown("# 🛡️ 对抗样本生成与模型鲁棒性评估平台")
         gr.Markdown("系统性测试图像分类模型在对抗攻击下的表现，找出模型的脆弱点")
 
@@ -980,5 +980,4 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
-        show_api=False
     )
